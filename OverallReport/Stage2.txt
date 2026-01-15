@@ -1,0 +1,57 @@
+GIAI ĐOẠN 2 – MAKEUP LAYER TRANSFER (REAL-TIME FILTER)
+Mục tiêu
+    Gán lớp trang điểm (makeup) từ ảnh tham chiếu lên khuôn mặt trong ảnh động / webcam theo kiểu Instagram / TikTok filter, đảm bảo:
+    Nhìn thấy rõ lớp trang điểm
+    Bám đúng vùng khuôn mặt (mắt, mí, chân mày…)
+    Chạy real-time
+    Chưa yêu cầu GAN hoàn chỉnh (cho phép chưa hoàn toàn tự nhiên)
+
+Input
+    Input chính (từ Giai đoạn 1)
+        frame (BGR): ảnh động từ webcam
+        EyeRegion:
+            box (bounding box mắt)
+            mask (polygon vùng mắt)
+            geometry
+            normalized crop
+
+    Input phụ
+        ref_image: ảnh tham chiếu có trang điểm
+        ref_eye: vùng mắt đã được detect & crop từ ảnh tham chiếu
+        Tham số blend:
+            Gaussian kernel
+            Alpha strength
+            Temporal momentum
+
+Các Stage trong Giai đoạn 2
+Stage 2.1 – Region Alignment: đưa makeup về đúng không gian của mắt thật
+    Resize vùng mắt từ ảnh tham chiếu: ref_resized = cv2.resize(ref_eye, (w, h))
+
+Stage 2.2 – Mask Preparation & Feathering: xác định chính xác vùng được phép nhận makeup
+    Crop mask theo bounding box
+    Feather mask bằng Gaussian Blur: alpha = cv2.GaussianBlur(mask_crop, (31, 31), 0) / 255.0
+
+Stage 2.3 – Makeup Blending (Core Stage): gán lớp makeup lên mắt thật
+    Công thức blend: blended = roi * (1 - alpha) + ref_resized * alpha
+
+    Makeup nằm trong pixel của ảnh tham chiếu
+    Mask quyết định vùng nào bị ảnh hưởng
+
+Stage 2.4 – Temporal Stabilization :giảm rung, nhấp nháy giữa các frame
+
+Áp dụng exponential moving average: smoothed = momentum * prev + (1 - momentum) * current
+
+Stage 2.5 – Composition: ghép lại vào frame gốc
+
+frame[y1:y2, x1:x2] = blended
+
+
+Output
+Output trực tiếp
+    frame_with_makeup (BGR)
+    Chạy real-time
+    Có thể record video / stream
+    Output trung gian (debug)
+    Eye mask overlay
+    Makeup ROI
+    Alpha mask visualization
