@@ -4,3 +4,6 @@ mediapipe==0.10.13
 pillow==10.2.0
 scipy==1.11.4
 tqdm==4.66.1
+
+torch
+torchvision
