@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 import torch
 
-
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -1,57 +1,81 @@
-LEFT_EYE_FULL = [
-    # eye core
-    33, 133,
-    159, 158, 157,
-    145, 153, 154,
+class EyeLandMark:
+    # LEFT EYE
+    # --- Core eye (mí chính) ---
+    LEFT_EYE_CORNER = [33, 133]
 
-    # outer eye contour + corner
-    161, 163,
+    LEFT_EYE_UPPER = [159, 158, 157]
+    LEFT_EYE_LOWER = [145, 153, 154]
 
-    # under eye (bọng mắt)
-    24, 23, 22,
+    # --- Outer contour ---
+    LEFT_EYE_OUTER = [161, 163]
 
-    # eyebrow
-    70, 63, 105, 66, 107, 55, 65
-]
+    # --- Under eye (bọng mắt) ---
+    LEFT_UNDER_EYE = [24, 23, 22]
 
-RIGHT_EYE_FULL = [
-    # eye core
-    362, 263, 387, 386, 385, 384, 398,
-    373, 374, 380, 381, 382,
+    # --- Eyebrow ---
+    LEFT_EYEBROW = [70, 63, 105, 66, 107, 55, 65]
 
-    # outer eye contour + corner
-    466, 388, 390, 249, 263, 362, 382, 381, 380, 374, 373,
+    # --- Full (gộp lại nếu cần) ---
+    LEFT_EYE_FULL = (
+        LEFT_EYE_CORNER +
+        LEFT_EYE_UPPER +
+        LEFT_EYE_LOWER +
+        LEFT_EYE_OUTER +
+        LEFT_UNDER_EYE +
+        LEFT_EYEBROW
+    )
 
-    # under eye (bọng mắt)
-    359, 255, 339, 254, 253, 252, 256,
+    # RIGHT EYE
 
-    # eyebrow
-    336, 296, 334, 293, 300, 285, 295
-]
+    RIGHT_EYE_CORNER = [362, 263]
 
-LEFT_IRIS = [
-    468, 469, 470, 471, 472
-]
+    RIGHT_EYE_UPPER = [387, 386, 385, 384, 398]
+    RIGHT_EYE_LOWER = [373, 374, 380, 381, 382]
 
-RIGHT_IRIS = [
-    473, 474, 475, 476, 477
-]
+    RIGHT_EYE_OUTER = [466, 388, 390, 249]
 
-LEFT_EYEBALL = [
-    # corner
-    33, 133,
+    RIGHT_UNDER_EYE = [359, 255, 339, 254, 253, 252, 256]
 
-    # upper lid (thêm ra 2 bên)
-    160, 159, 158, 157, 173,
+    RIGHT_EYEBROW = [336, 296, 334, 293, 300, 285, 295]
 
-    # lower lid (mở rộng xuống)
-    144, 145, 153, 154, 155
-]
+    RIGHT_EYE_FULL = (
+        RIGHT_EYE_CORNER +
+        RIGHT_EYE_UPPER +
+        RIGHT_EYE_LOWER +
+        RIGHT_EYE_OUTER +
+        RIGHT_UNDER_EYE +
+        RIGHT_EYEBROW
+    )
 
-RIGHT_EYEBALL = [
-    362, 263,
+    # =========================
+    # IRIS
+    # =========================
 
-    387, 386, 385, 384, 398,
+    LEFT_IRIS = [468, 469, 470, 471, 472]
+    RIGHT_IRIS = [473, 474, 475, 476, 477]
 
-    373, 374, 380, 381, 382
-]
+    # =========================
+    # EYEBALL (tròng trắng + iris region)
+    # =========================
+
+    LEFT_EYEBALL_CORNER = [33, 133]
+
+    LEFT_EYEBALL_UPPER = [160, 159, 158, 157, 173]
+    LEFT_EYEBALL_LOWER = [144, 145, 153, 154, 155]
+
+    LEFT_EYEBALL = (
+        LEFT_EYEBALL_CORNER +
+        LEFT_EYEBALL_UPPER +
+        LEFT_EYEBALL_LOWER
+    )
+
+    RIGHT_EYEBALL_CORNER = [362, 263]
+
+    RIGHT_EYEBALL_UPPER = [387, 386, 385, 384, 398]
+    RIGHT_EYEBALL_LOWER = [373, 374, 380, 381, 382]
+
+    RIGHT_EYEBALL = (
+        RIGHT_EYEBALL_CORNER +
+        RIGHT_EYEBALL_UPPER +
+        RIGHT_EYEBALL_LOWER
+    )

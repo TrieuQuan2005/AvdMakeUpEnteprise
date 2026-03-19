@@ -1,7 +1,7 @@
 import nn
 import torch
 
-from AdvMakeUp.Utils.utils import get_device
+from AdvMakeup.Utils.utils import get_device
 
 #Chuẩn hóa màu
 class MeanShift(nn.Conv2d):

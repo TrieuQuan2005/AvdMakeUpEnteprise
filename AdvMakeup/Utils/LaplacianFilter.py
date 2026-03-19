@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from AdvMakeUp.Utils.utils import get_device
+from AdvMakeup.Utils.utils import get_device
 
 #Làm nổi bật viền
 class LaplacianFilter(nn.Module):

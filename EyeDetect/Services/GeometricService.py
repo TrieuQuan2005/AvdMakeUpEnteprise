@@ -36,11 +36,30 @@ class EyeGeometricService:
         )
 
     @staticmethod
-    def polygon_mask(image_shape, pts: np.ndarray) -> np.ndarray:
-        mask = np.zeros(image_shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [pts.astype(np.int32)], 255)
-        mask = cv2.GaussianBlur(mask, (7, 7), 0)
-        return mask.astype(np.float32) / 255.0
+    def polygon_mask(pts: np.ndarray, box) -> np.ndarray:
+        x1, y1, x2, y2 = box.x1, box.y1, box.x2, box.y2
+        w = x2 - x1
+        h = y2 - y1
+
+        pts_local = pts.copy()
+        pts_local[:, 0] -= x1
+        pts_local[:, 1] -= y1
+
+        # Smooth contour (optional nhưng nên có)
+        pts_smooth = cv2.approxPolyDP(
+            pts_local.astype(np.int32),
+            epsilon=1.5,
+            closed=True
+        )
+
+        hull = cv2.convexHull(pts_smooth)
+
+        mask = np.zeros((h, w), dtype=np.float32)
+        cv2.fillPoly(mask, [hull], 1.0)
+
+        mask = cv2.GaussianBlur(mask, (11, 11), 0)
+
+        return mask
 
     @staticmethod
     def eye_direction(pts):
@@ -84,16 +103,22 @@ class EyeGeometricService:
         )
 
     @staticmethod
-    def get_eye_box(pts, img_w, img_h) -> BoundingBox:
+    def get_eye_box(pts, img_w, img_h, pad: int = 2) -> BoundingBox:
         x_min, y_min = pts.min(axis=0)
         x_max, y_max = pts.max(axis=0)
 
-        ew = x_max - x_min
-        eh = y_max - y_min
-
-        x1 = int(max(0, x_min - 0.10 * ew))
-        x2 = int(min(img_w - 1, x_max + 0.25 * ew))
-        y1 = int(max(0, y_min - 0.32 * eh))
-        y2 = int(min(img_h - 1, y_max + 0.39 * eh))
+        x1 = int(max(0, x_min - pad))
+        y1 = int(max(0, y_min - pad))
+        x2 = int(min(img_w - 1, x_max + pad))
+        y2 = int(min(img_h - 1, y_max + pad))
 
         return BoundingBox(x1, y1, x2, y2)
+
+def order_points(pts: np.ndarray):
+    center = np.mean(pts, axis=0)
+
+    angles = np.arctan2(pts[:,1] - center[1], pts[:,0] - center[0])
+
+    sorted_idx = np.argsort(angles)
+
+    return pts[sorted_idx]

@@ -3,7 +3,7 @@ from collections import namedtuple
 import nn
 from torchvision import models
 
-from AdvMakeUp.Utils.utils import get_device
+from AdvMakeup.Utils.utils import get_device
 
 
 class VGG16FeatureExtractor(nn.Module):

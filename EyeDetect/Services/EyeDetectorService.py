@@ -1,11 +1,11 @@
 import cv2
+import numpy as np
 from typing import Optional, Tuple
 
-from EyeDetect.Enums.EyeIndex import LEFT_EYE_EXT_IDX, RIGHT_EYE_EXT_IDX
+from EyeDetect.ValueObjects.EyeLandMark import EyeLandMark
 from EyeDetect.Enums.EyeSide import EyeSide
 
 from EyeDetect.Services.GeometricService import EyeGeometricService
-
 from EyeDetect.ValueObjects.EyeRegion import EyeRegion
 
 
@@ -25,16 +25,30 @@ class EyeDetectorService:
         landmarks = results.multi_face_landmarks[0].landmark
         h, w = frame_bgr.shape[:2]
 
+        # ===== EXTRACT =====
         left_eye = self._extract_eye(
-            frame_bgr, landmarks, LEFT_EYE_EXT_IDX, w, h, EyeSide.LEFT
+            frame_bgr, landmarks, EyeLandMark.LEFT_EYE_FULL, w, h, EyeSide.LEFT
         )
 
         right_eye = self._extract_eye(
-            frame_bgr, landmarks, RIGHT_EYE_EXT_IDX, w, h, EyeSide.RIGHT
+            frame_bgr, landmarks, EyeLandMark.RIGHT_EYE_FULL, w, h, EyeSide.RIGHT
         )
 
-        if left_eye is None or right_eye is None:
+        left_eyeball = self._extract_eye(
+            frame_bgr, landmarks, EyeLandMark.LEFT_EYEBALL, w, h, EyeSide.LEFT
+        )
+
+        right_eyeball = self._extract_eye(
+            frame_bgr, landmarks, EyeLandMark.RIGHT_EYEBALL, w, h, EyeSide.RIGHT
+        )
+
+        # SAFE CHECK
+        if any(x is None for x in [left_eye, right_eye, left_eyeball, right_eyeball]):
             return None
+
+        # REMOVE EYEBALL REGION
+        left_eye = self._remove_eyeball(left_eye, left_eyeball)
+        right_eye = self._remove_eyeball(right_eye, right_eyeball)
 
         return left_eye, right_eye
 
@@ -49,7 +63,7 @@ class EyeDetectorService:
         side: EyeSide
     ) -> Optional[EyeRegion]:
 
-        # 1. Points
+        # 1. Landmarks → points
         pts = EyeGeometricService.landmarks_to_points(
             landmarks, indices, w, h
         )
@@ -57,9 +71,16 @@ class EyeDetectorService:
         if pts.shape[0] < 3:
             return None
 
+        # 2. Geometry
         geometry = EyeGeometricService.compute_geometry(pts)
+
+        # 3. Bounding box
         box = EyeGeometricService.get_eye_box(pts, w, h)
-        mask = EyeGeometricService.polygon_mask(image.shape, pts)
+
+        # 4. Mask
+        mask = EyeGeometricService.polygon_mask(pts, box)
+
+        # 5. Normalize
         normalized = EyeGeometricService.normalize(
             image,
             box,
@@ -69,8 +90,7 @@ class EyeDetectorService:
         if normalized is None:
             return None
 
-        # 7. Build EyeRegion (CONTRACT)
-        eye_region = EyeRegion(
+        return EyeRegion(
             side=side,
             points=pts,
             geometry=geometry,
@@ -78,4 +98,49 @@ class EyeDetectorService:
             mask=mask,
             normalized=normalized
         )
+
+    # REMOVE EYEBALL
+    @staticmethod
+    def _remove_eyeball(
+        eye_region: EyeRegion,
+        eyeball_region: EyeRegion
+    ) -> EyeRegion:
+
+        outer_mask = eye_region.mask
+        inner_small = eyeball_region.mask
+
+        H, W = outer_mask.shape
+        inner_mask = np.zeros((H, W), dtype=np.float32)
+
+        # OFFSET (align 2 bounding boxes)
+        dx = int(round(eyeball_region.box.x1 - eye_region.box.x1))
+        dy = int(round(eyeball_region.box.y1 - eye_region.box.y1))
+
+        h, w = inner_small.shape
+
+        # TARGET REGION
+        x1 = max(0, dx)
+        y1 = max(0, dy)
+        x2 = min(W, dx + w)
+        y2 = min(H, dy + h)
+
+        # SOURCE REGION
+        sx1 = max(0, -dx)
+        sy1 = max(0, -dy)
+        sx2 = sx1 + (x2 - x1)
+        sy2 = sy1 + (y2 - y1)
+
+        # PASTE
+        inner_mask[y1:y2, x1:x2] = inner_small[sy1:sy2, sx1:sx2]
+
+        inner_mask = (inner_mask > 0.5).astype(np.float32)
+
+        # SUBTRACT
+        clean_mask = np.clip(outer_mask - inner_mask, 0.0, 1.0)
+
+        # Feather lại cho mượt
+        clean_mask = cv2.GaussianBlur(clean_mask, (7, 7), 0)
+
+        eye_region.mask = clean_mask
+
         return eye_region
