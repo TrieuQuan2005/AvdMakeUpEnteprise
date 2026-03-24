@@ -1,13 +1,12 @@
 import os
-
 import cv2
 import torch
 import shutil
 from PIL import Image
 import mediapipe as mp
-from tqdm import tqdm
 import torchvision.transforms as T
 import numpy as np
+from tqdm import tqdm
 
 from AdvMakeup.Models.FaceReconizationModels.FaceNet.FaceNetWrapper import FaceNetWrapper
 from EyeDetect.Services.EyeDetectorService import EyeDetectorService
@@ -24,40 +23,48 @@ os.makedirs(FACE_OUT, exist_ok=True)
 os.makedirs(EMB_OUT, exist_ok=True)
 os.makedirs(MASK_OUT, exist_ok=True)
 
-# ====== TRANSFORM ======
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 transform = T.Compose([
     T.Resize((160, 160)),
-    T.ToTensor(),
-    T.Lambda(lambda x: x * 255.0)
+    T.ToTensor(),                 # [0,1]
+    T.Lambda(lambda x: x * 255.0) # -> [0,255]
 ])
 
-# ====== INIT MODELS ======
-facenet = FaceNetWrapper()
+facenet = FaceNetWrapper().to(device).eval()
 
 mp_face_mesh = mp.solutions.face_mesh
-
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
     max_num_faces=1,
     refine_landmarks=True,
     min_detection_confidence=0.5
 )
+
 eyeDetector = EyeDetectorService(face_mesh)
 
-
-# ====== FUNCTIONS ======
 def get_embedding(img_tensor):
     with torch.no_grad():
-        return facenet.get_embedding(img_tensor)
+        emb = facenet.get_embedding(img_tensor)
+
+        if emb is None:
+            raise ValueError("Embedding is None")
+
+        if torch.isnan(emb).any():
+            raise ValueError("Embedding contains NaN")
+
+        if emb.shape[-1] != 512:
+            raise ValueError(f"Invalid embedding shape: {emb.shape}")
+
+        return emb
 
 
 def paste_mask(full_mask, small_mask, box):
-    x1, y1, x2, y2 = int(box.x1), int(box.y1), int(box.x2), int(box.y2)
+    x1, y1 = int(box.x1), int(box.y1)
 
     H, W = full_mask.shape
     h, w = small_mask.shape
 
-    # clamp vùng
     x2 = min(x1 + w, W)
     y2 = min(y1 + h, H)
 
@@ -70,12 +77,10 @@ def paste_mask(full_mask, small_mask, box):
 
 
 def get_eye_mask(img_pil):
-    # convert PIL -> OpenCV BGR
     img_np = np.array(img_pil)
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
     result = eyeDetector.detect(img_bgr)
-
     if result is None:
         return None
 
@@ -89,10 +94,13 @@ def get_eye_mask(img_pil):
 
     full_mask = cv2.GaussianBlur(full_mask, (15, 15), 0)
 
+    # normalize mask
+    if full_mask.max() > 0:
+        full_mask = full_mask / full_mask.max()
+
     return np.clip(full_mask, 0, 1)
 
 
-# ====== MAIN ======
 def process_faces():
     persons = sorted(os.listdir(INPUT_FACE_DIR))
 
@@ -102,7 +110,6 @@ def process_faces():
         if not os.path.isdir(person_path):
             continue
 
-        # ===== Create output folders =====
         out_face_person = os.path.join(FACE_OUT, person)
         out_mask_person = os.path.join(MASK_OUT, person)
 
@@ -119,42 +126,39 @@ def process_faces():
 
             try:
                 img = Image.open(img_path).convert("RGB")
-            except:
-                print(f"[WARN] Cannot open {img_path}")
+            except Exception as e:
+                print(f"[ERROR] Cannot open {img_path}: {e}")
                 continue
 
-            # ===== Save face =====
             shutil.copy(img_path, os.path.join(out_face_person, img_name))
 
-            # ===== Embedding =====
             try:
-                img_tensor = transform(img).unsqueeze(0)
-                emb = get_embedding(img_tensor)  # (1,512)
+                img_tensor = transform(img).unsqueeze(0).to(device)
+                img_tensor = torch.clamp(img_tensor, 0, 255)
 
+                emb = get_embedding(img_tensor)
                 embeddings.append(emb.squeeze(0).cpu())
-            except:
-                print(f"[WARN] Embedding failed: {img_path}")
+
+            except Exception as e:
+                print(f"[ERROR] Embedding failed: {img_path} | {e}")
                 continue
 
-            # ===== Mask =====
             try:
                 mask = get_eye_mask(img)
 
                 if mask is not None:
                     mask_img = Image.fromarray((mask * 255).astype("uint8"))
-
                     mask_name = os.path.splitext(img_name)[0] + "_mask.png"
                     mask_img.save(os.path.join(out_mask_person, mask_name))
-            except:
-                print(f"[WARN] Mask failed: {img_path}")
+
+            except Exception as e:
+                print(f"[ERROR] Mask failed: {img_path} | {e}")
 
             valid_count += 1
 
-        # ===== Save embeddings =====
         if len(embeddings) > 0:
             embeddings = torch.stack(embeddings)
 
-            # mean embedding (for victim target)
             mean_emb = embeddings.mean(dim=0)
 
             torch.save(mean_emb, os.path.join(EMB_OUT, f"{person}.pt"))

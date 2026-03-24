@@ -1,6 +1,6 @@
 from collections import namedtuple
 
-import nn
+import torch.nn as nn
 from torchvision import models
 
 from AdvMakeup.Utils.utils import get_device

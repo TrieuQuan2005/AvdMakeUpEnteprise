@@ -19,9 +19,19 @@ class FaceNetWrapper(nn.Module):
         self.input_size = (160, 160)
 
     def preprocess(self, x):
-        # x: [B, 3, H, W], range [0,255]
-        x = F.interpolate(x, size=self.input_size, mode='bilinear', align_corners=False)
-        x = (x - 127.5) / 128.0
+        # x: [B,3,H,W] range [0,255]
+
+        x = F.interpolate(
+            x,
+            size=self.input_size,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # normalize đúng FaceNet
+        x = x / 255.0
+        x = (x - 0.5) / 0.5
+
         return x
 
     def forward(self, x):

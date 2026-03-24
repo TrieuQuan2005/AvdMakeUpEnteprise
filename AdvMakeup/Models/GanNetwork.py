@@ -1,6 +1,4 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn import init
 
 class FiLM(nn.Module):
@@ -39,25 +37,33 @@ class LeakyReLUConv2d(nn.Module):
         return self.model(x)
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class Generator(nn.Module):
     def __init__(self, emb_dim=512):
         super().__init__()
 
+        # ===== Encoder =====
         self.enc1 = nn.Sequential(
-            nn.Conv2d(4, 64, 5, 2, 2),
+            nn.Conv2d(4, 64, 5, 2, 2),   # 160 -> 80
             nn.InstanceNorm2d(64),
             nn.LeakyReLU(0.2)
         )
 
         self.enc2 = nn.Sequential(
-            nn.Conv2d(64, 128, 5, 2, 2),
+            nn.Conv2d(64, 128, 5, 2, 2),  # 80 -> 40
             nn.InstanceNorm2d(128),
             nn.LeakyReLU(0.2)
         )
 
+        # ===== FiLM =====
         self.film1 = FiLM(emb_dim, 128)
         self.film2 = FiLM(emb_dim, 64)
 
+        # ===== Decoder =====
         self.dec1 = nn.Sequential(
             nn.Conv2d(128, 128, 3, padding=1),
             nn.InstanceNorm2d(128),
@@ -65,13 +71,14 @@ class Generator(nn.Module):
         )
 
         self.dec2 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, 3, padding=1),
+            nn.Conv2d(128 + 64, 64, 3, padding=1),  # concat x1
             nn.InstanceNorm2d(64),
             nn.ReLU()
         )
 
+        # ❗ KHÔNG concat nữa ở đây
         self.dec3 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, 3, padding=1),
+            nn.Conv2d(64, 64, 3, padding=1),
             nn.InstanceNorm2d(64),
             nn.ReLU()
         )
@@ -81,25 +88,35 @@ class Generator(nn.Module):
     def forward(self, x, mask, target_emb):
         x_in = torch.cat([x, mask], dim=1)
 
+        # ===== Encoder =====
         x1 = self.enc1(x_in)
         x2 = self.enc2(x1)
 
         x2 = self.film1(x2, target_emb)
 
+        # ===== Decoder =====
         d1 = self.dec1(x2)
 
         d1_up = F.interpolate(d1, scale_factor=2)
+
         d2 = self.dec2(torch.cat([d1_up, x1], dim=1))
 
         d2_up = F.interpolate(d2, scale_factor=2)
-        d3 = self.dec3(torch.cat([d2_up, x1], dim=1))
+
+        d3 = self.dec3(d2_up)
 
         d3 = self.film2(d3, target_emb)
 
+        # ===== perturbation =====
         epsilon = 10.0
         perturb = torch.tanh(self.out_conv(d3)) * epsilon
 
-        return perturb * mask
+        # ===== APPLY ATTACK =====
+        adv = x + perturb * mask
+
+        adv = torch.clamp(adv, 0, 255)
+        print("perturb mean:", perturb.abs().mean().item())
+        return adv
 
 
 # DISCRIMINATOR
@@ -136,8 +153,8 @@ class GanNetwork(nn.Module):
         pred = self.discriminator(fake)
         return fake, pred
 
-    def generate(self, x):
-        return self.generator(x)
+    def generate(self, x, mask, emb):
+        return self.generator(x, mask, emb)
 
     def discriminate(self, x):
         return self.discriminator(x)
