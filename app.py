@@ -6,8 +6,9 @@ import os
 import torch.nn.functional as F
 
 from AdvMakeup.Models.GanNetwork import GanNetwork
-from AdvMakeup.Models.FaceReconizationModels.FaceNet.FaceNetWrapper import FaceNetWrapper
+from AdvMakeup.Models.FaceNetWrapper import FaceNetWrapper
 from AdvMakeup.MakeupAttackInference import RealtimeMakeupAttack
+from AdvMakeup.Utils.GetDevice import get_device
 from EyeDetect.Services.EyeDetectorService import EyeDetectorService
 
 import mediapipe as mp
@@ -21,7 +22,7 @@ def compute_loss_id(emb1, emb2):
 
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device()
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 

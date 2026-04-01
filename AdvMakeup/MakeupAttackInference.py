@@ -1,32 +1,47 @@
-# realtime_inference.py
-
 import torch
 import cv2
 import numpy as np
 import torchvision.transforms as T
 
 
-def preprocess_facenet(x):
-    return (x / 127.5) - 1.0
-
-
 class RealtimeMakeupAttack:
     def __init__(self, generator, fr_model, eye_detector, device):
         self.device = device
+
         self.G = generator.to(device).eval()
         self.fr_model = fr_model.to(device).eval()
         self.eye_detector = eye_detector
 
-        self.transform = T.Compose([
-            T.ToTensor()
-        ])
+        self.transform = T.ToTensor()
 
-    def get_embedding(self, img_tensor):
-        with torch.no_grad():
-            emb = self.fr_model(preprocess_facenet(img_tensor))
-        return emb
+        self.victim_emb = None
+        self.makeup = None
 
-    def run_frame(self, frame_bgr, victim_emb):
+    # PUBLIC API
+    def set_victim_embedding(self, emb):
+        self.victim_emb = emb.to(self.device)
+
+    def set_makeup(self, makeup_bgr):
+        makeup_rgb = cv2.cvtColor(makeup_bgr, cv2.COLOR_BGR2RGB)
+
+        makeup = self.transform(makeup_rgb).unsqueeze(0) * 255.0
+        self.makeup = makeup.to(self.device)
+
+    def clear_makeup(self):
+        self.makeup = None
+
+    def __call__(self, frame_bgr):
+        return self.run_frame(frame_bgr)
+
+    # INTERNAL
+    def run_frame(self, frame_bgr):
+
+        if self.victim_emb is None:
+            return frame_bgr
+
+        if self.makeup is None:
+            return frame_bgr
+
         result = self.eye_detector.detect(frame_bgr)
 
         if result is None:
@@ -40,14 +55,13 @@ class RealtimeMakeupAttack:
             if eye.normalized is None or eye.mask is None:
                 continue
 
-            eye_img = eye.normalized.image   # (H, W, 3)
-            mask = eye.mask                 # (H, W)
+            eye_img = eye.normalized.image
+            mask = eye.mask
 
             h, w = eye_img.shape[:2]
             mask = cv2.resize(mask, (w, h))
 
             mask = mask.astype(np.float32)
-
             mask = cv2.GaussianBlur(mask, (15, 15), 0)
             mask = np.clip(mask, 0, 1)
 
@@ -57,20 +71,14 @@ class RealtimeMakeupAttack:
             img_tensor = img_tensor.to(self.device)
             mask_tensor = mask_tensor.to(self.device)
 
-            victim_emb_batch = victim_emb.repeat(1, 1)
-
             with torch.no_grad():
-                perturb = self.G(img_tensor, mask_tensor, victim_emb_batch)
 
-                perturb = perturb.mean(dim=1, keepdim=True)
-
-                perturb = torch.clamp(perturb, -3, 3)
-
-                # ===== thử các kiểu =====
-                #x_adv = img_tensor * (1 - mask_tensor) + (img_tensor + perturb) * mask_tensor
-                #x_adv = img_tensor + 50 * mask_tensor #Makeup mo
-                #x_adv = img_tensor * (1 - mask_tensor) + (img_tensor + 50 * perturb) * mask_tensor # Vo mau
-                x_adv = img_tensor * (1 - mask_tensor) + (img_tensor + 20 * perturb) * mask_tensor # Vo mau
+                x_adv = self.G(
+                    img_tensor,
+                    mask_tensor,
+                    self.victim_emb,
+                    self.makeup
+                )
 
                 x_adv = torch.clamp(x_adv, 0, 255)
 
@@ -82,11 +90,6 @@ class RealtimeMakeupAttack:
                 continue
 
             adv_np = cv2.resize(adv_np, (x2 - x1, y2 - y1))
-
             frame_out[y1:y2, x1:x2] = adv_np
-
-            # ===== debug =====
-            print("Mask min/max:", mask.min(), mask.max())
-            print("Perturb mean:", perturb.abs().mean().item())
 
         return frame_out

@@ -6,6 +6,46 @@ from requests.adapters import HTTPAdapter
 import os
 
 
+class FaceNetWrapper(nn.Module):
+    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
+        super().__init__()
+
+        self.device = device
+
+        self.model = InceptionResnetV1(
+            pretrained='vggface2',
+            classify=False
+        ).eval().to(device)
+
+        self.input_size = (160, 160)
+
+    def preprocess(self, x):
+        # x: [B,3,H,W] range [0,255]
+
+        x = F.interpolate(
+            x,
+            size=self.input_size,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # normalize đúng FaceNet
+        x = x / 255.0
+        x = (x - 0.5) / 0.5
+
+        return x
+
+    def forward(self, x):
+        x = self.preprocess(x)
+        emb = self.model(x)
+        emb = F.normalize(emb, dim=1)
+        return emb
+
+    @torch.no_grad()
+    def get_embedding(self, x):
+        return self.forward(x)
+    
+
 class BasicConv2d(nn.Module):
 
     def __init__(self, in_planes, out_planes, kernel_size, stride, padding=0):
