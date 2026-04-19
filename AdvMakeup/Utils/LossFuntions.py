@@ -3,50 +3,103 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
+# =========================
+# IDENTITY LOSS (STRONG + STABLE)
+# =========================
+def identity_loss(emb_adv, emb_victim, emb_attacker, margin=0.3):
 
-# IDENTITY LOSS (FaceNet)
-def cosine_loss(a, b):
-    return 1 - F.cosine_similarity(a, b, dim=1).mean()
+    cos_v = F.cosine_similarity(emb_adv, emb_victim)
+    cos_a = F.cosine_similarity(emb_adv, emb_attacker)
+
+    loss_v = F.relu(0.6 - cos_v) ** 2
+
+    # 🔥 giữ attacker nhưng không quá ép
+    loss_a = F.relu(cos_a - margin) ** 2
+
+    return (loss_v + 0.3 * loss_a).mean()
 
 
-# REGION LOSS (only makeup area)
+# =========================
+# REGION LOSS (SAFE)
+# =========================
 def region_loss(x_adv, x, mask):
     mask = mask.expand_as(x_adv)
-    return ((1 - mask) * (x_adv - x)).abs().mean()
+
+    diff = ((1 - mask) * (x_adv - x)).abs()
+
+    denom = torch.clamp((1 - mask).sum(), min=1.0)
+    return diff.sum() / denom
 
 
-# GAN LOSS
-def gan_loss(pred, target_is_real):
-    target = torch.ones_like(pred) if target_is_real else torch.zeros_like(pred)
-    return F.binary_cross_entropy_with_logits(pred, target)
+# =========================
+# GLOBAL L2
+# =========================
+def l2_loss(x_adv, x):
+    return (x_adv - x).pow(2).mean()
 
 
-# GRAM MATRIX
+# =========================
+# GAN LOSS (HINGE)
+# =========================
+def gan_d_loss(real, fake):
+    return F.relu(1.0 - real).mean() + F.relu(1.0 + fake).mean()
+
+
+def gan_g_loss(fake):
+    return -fake.mean()
+
+
+# =========================
+# GRAM MATRIX (ANTI-EXPLODE)
+# =========================
 def gram_matrix(x):
     B, C, H, W = x.size()
+
     f = x.view(B, C, H * W)
-    return torch.bmm(f, f.transpose(1, 2)) / (C * H * W)
+
+    # normalize theo feature vector
+    f = f / (f.norm(dim=2, keepdim=True) + 1e-6)
+
+    gm = torch.bmm(f, f.transpose(1, 2))
+
+    # 🔥 scale + clamp tránh explode
+    gm = gm / (C + 1e-6)
+    gm = torch.clamp(gm, -1.0, 1.0)
+
+    return gm
 
 
-# STYLE LOSS (makeup transfer)
+# =========================
+# STYLE LOSS (STABLE)
+# =========================
 def style_loss(vgg, x_adv, makeup):
 
-    # preprocess for VGG
-    x_adv = vgg.preprocess_vgg(x_adv * 255)
-    makeup = vgg.preprocess_vgg(makeup * 255)
+    x_adv = torch.clamp(x_adv, 0, 1)
+    makeup = torch.clamp(makeup, 0, 1)
+
+    x_adv = vgg.preprocess_vgg(x_adv)
+    makeup = vgg.preprocess_vgg(makeup)
 
     feat_adv = vgg(x_adv)
     feat_make = vgg(makeup)
 
-    loss = 0
+    loss = 0.0
 
     for fa, fm in zip(feat_adv, feat_make):
-        loss += (gram_matrix(fa) - gram_matrix(fm)).abs().mean()
+        gm_adv = gram_matrix(fa)
+        gm_make = gram_matrix(fm)
 
-    return loss
+        diff = (gm_adv - gm_make).abs().mean()
+        diff = torch.clamp(diff, 0, 10)
+
+        loss += diff
+
+    return loss / len(feat_adv)
 
 
-# EDGE LOSS
+# =========================
+# EDGE LOSS (SAFE)
+# =========================
 class LaplacianFilter(nn.Module):
     def __init__(self):
         super().__init__()
@@ -58,52 +111,72 @@ class LaplacianFilter(nn.Module):
         ], dtype=torch.float32)
 
         kernel = kernel.unsqueeze(0).unsqueeze(0)
-
         self.register_buffer("kernel", kernel)
 
     def forward(self, x):
         return F.conv2d(x, self.kernel, padding=1)
 
 
-def edge_loss(lap, x_adv, makeup):
-
+def edge_loss(lap, x_adv, makeup, mask):
     x_adv_gray = x_adv.mean(dim=1, keepdim=True)
     makeup_gray = makeup.mean(dim=1, keepdim=True)
 
     edge_adv = lap(x_adv_gray)
     edge_make = lap(makeup_gray)
 
-    return (edge_adv - edge_make).abs().mean()
+    mask = mask.mean(dim=1, keepdim=True)
+
+    diff = (edge_adv - edge_make).abs() * mask
+
+    denom = torch.clamp(mask.sum(), min=1.0)
+    return diff.sum() / denom
 
 
+# =========================
 # SMOOTH LOSS
-def smooth_loss(x):
-    return (
-        (x[:, :, :-1, :] - x[:, :, 1:, :]).abs().mean() +
-        (x[:, :, :, :-1] - x[:, :, :, 1:]).abs().mean()
-    )
+# =========================
+def smooth_loss(x, mask=None):
+    dx = (x[:, :, :-1, :] - x[:, :, 1:, :]).abs()
+    dy = (x[:, :, :, :-1] - x[:, :, :, 1:]).abs()
+
+    if mask is not None:
+        mask_x = mask[:, :, :-1, :] * mask[:, :, 1:, :]
+        mask_y = mask[:, :, :, :-1] * mask[:, :, :, 1:]
+
+        dx = dx * mask_x
+        dy = dy * mask_y
+
+    return dx.mean() + dy.mean()
 
 
-
-# PERCEPTUAL LOSS (VGG)
+# =========================
+# PERCEPTUAL LOSS (STABLE)
+# =========================
 def perceptual_loss(vgg, x_adv, x):
 
-    x_adv = vgg.preprocess_vgg(x_adv * 255)
-    x = vgg.preprocess_vgg(x * 255)
+    x_adv = torch.clamp(x_adv, 0, 1)
+    x = torch.clamp(x, 0, 1)
+
+    x_adv = vgg.preprocess_vgg(x_adv)
+    x = vgg.preprocess_vgg(x)
 
     feat_adv = vgg(x_adv)
     feat_x = vgg(x)
 
-    loss = 0
+    loss = 0.0
 
     for fa, fx in zip(feat_adv, feat_x):
-        loss += (fa - fx).abs().mean()
+        diff = (fa - fx).abs().mean()
+        diff = torch.clamp(diff, 0, 10)
 
-    return loss
+        loss += diff
+
+    return loss / len(feat_adv)
 
 
-
-# TOTAL LOSS
+# =========================
+# TOTAL LOSS (FINAL BALANCED)
+# =========================
 def total_loss(
     loss_id,
     loss_perc,
@@ -112,18 +185,20 @@ def total_loss(
     loss_style,
     loss_edge,
     loss_smooth,
+    loss_l2,
     w=None
 ):
 
     if w is None:
         w = dict(
-            id=25,
-            perc=0.3,
-            reg=5,
-            gan=1,
-            style=8,
-            edge=1.5,
-            smooth=0.1
+            id=25.0,  # 🔥 tăng mạnh
+            perc=0.1,  # 🔽 giảm
+            reg=0.2,  # 🔽 giảm mạnh
+            gan=0.2,  # 🔽 giảm
+            style=0.2,
+            edge=0.1,
+            smooth=0.05,
+            l2=0.3
         )
 
     return (
@@ -133,5 +208,6 @@ def total_loss(
         w["gan"] * loss_gan +
         w["style"] * loss_style +
         w["edge"] * loss_edge +
-        w["smooth"] * loss_smooth
+        w["smooth"] * loss_smooth +
+        w["l2"] * loss_l2
     )

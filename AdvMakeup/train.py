@@ -1,218 +1,240 @@
 import os
-import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from PIL import Image
 
 from AdvMakeup.DatasetManager.AttackDataset import AttackDataset
-
-from AdvMakeup.Utils.LossFuntions import (
-    cosine_loss,
-    region_loss,
-    gan_loss,
-    perceptual_loss,
-    smooth_loss,
-    total_loss
-)
-
+from AdvMakeup.Utils.LossFuntions import *
 from AdvMakeup.Models.FaceNetWrapper import FaceNetWrapper
 from AdvMakeup.Models.GanNetwork import GanNetwork
 from AdvMakeup.Models.VGG16FeatureExtractor import VGG16FeatureExtractor
 from AdvMakeup.Utils.GetDevice import get_device
 
 
+# =========================
+# CONFIG
+# =========================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DATASET_DIR = os.path.join(BASE_DIR, "dataset")
+VICTIM_PATH = os.path.join(BASE_DIR, "victims", "target.jpg")
+
+SAVE_DIR = os.path.join(BASE_DIR, "checkpoints")
+os.makedirs(SAVE_DIR, exist_ok=True)
+
 DEVICE = get_device()
 torch.backends.cudnn.benchmark = True
 
-SAVE_DIR = "./checkpoints"
-BEST_MODEL_PATH = os.path.join(SAVE_DIR, "G_best.pth")
-LAST_MODEL_PATH = os.path.join(SAVE_DIR, "G_last.pth")
+
+# =========================
+# UTILS
+# =========================
+def load_victim(path, transform):
+    img = Image.open(path).convert("RGB")
+    img = transform(img).unsqueeze(0)
+    print("[VICTIM] Loaded target")
+    return img
 
 
+def has_nan(x):
+    return torch.isnan(x).any() or torch.isinf(x).any()
 
+
+def grad_norm(model):
+    total = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total += p.grad.data.norm(2).item()
+    return total
+
+
+# =========================
 # TRAIN
-def train(
-    gan,
-    fr_model,
-    vgg_model,
-    dataset,
-    epochs=6,
-    batch_size=4,
-    num_workers=2
-):
+# =========================
+def train():
 
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    print("🚀 RUNNING FILE:", __file__)
+
+    dataset = AttackDataset(DATASET_DIR, max_imgs_per_person=200)
 
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=16,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True
     )
 
-    G = gan.generator
-    D = gan.discriminator
+    gan = GanNetwork(DEVICE)
+    G, D = gan.generator, gan.discriminator
 
-    G.train()
-    D.train()
+    fr = FaceNetWrapper(device=DEVICE).eval()
+    vgg = VGG16FeatureExtractor().to(DEVICE).eval()
 
-    fr_model.eval()
-    vgg_model.eval()
-
-    for p in fr_model.parameters():
+    for p in fr.parameters():
+        p.requires_grad = False
+    for p in vgg.parameters():
         p.requires_grad = False
 
-    for p in vgg_model.parameters():
-        p.requires_grad = False
-
-    opt_G = torch.optim.Adam(G.parameters(), lr=1e-4, betas=(0.5, 0.999))
+    # 🔥 LR giảm để ổn định
+    opt_G = torch.optim.Adam(G.parameters(), lr=2e-5, betas=(0.5, 0.999))
     opt_D = torch.optim.Adam(D.parameters(), lr=1e-4, betas=(0.5, 0.999))
 
-    best_cos = -1.0
+    scaler_G = torch.amp.GradScaler("cuda")
+    scaler_D = torch.amp.GradScaler("cuda")
 
-    for epoch in range(epochs):
+    lap = LaplacianFilter().to(DEVICE)
 
-        pbar = tqdm(loader, desc=f"Epoch {epoch}")
+    victim_img = load_victim(VICTIM_PATH, dataset.img_transform).to(DEVICE)
 
-        epoch_cos = 0
-        step_count = 0
+    with torch.no_grad():
+        victim_emb = fr(victim_img, detach=True)
 
-        for attacker_img, mask, victim_emb, makeup_img in pbar:
+    # =========================
+    # LOOP
+    # =========================
+    for epoch in range(12):
+
+        print(f"\n===== EPOCH {epoch} =====")
+        pbar = tqdm(loader)
+
+        for step, (attacker_img, mask, attacker_emb, makeup_img) in enumerate(pbar):
 
             attacker_img = attacker_img.to(DEVICE)
-            mask = mask.to(DEVICE)
-            victim_emb = victim_emb.to(DEVICE)
+            mask = mask.to(DEVICE).float()
             makeup_img = makeup_img.to(DEVICE)
+            attacker_emb = F.normalize(attacker_emb.to(DEVICE), dim=1)
 
-            
-            # Generator forward
-            x_adv = G(
-                attacker_img,
-                mask,
-                victim_emb,
-                makeup_img
-            )
+            # MASK
+            mask = torch.clamp(mask, 0, 1)
+            mask = mask * 3.0
+            mask = torch.clamp(mask, 0.3, 1.0)  # 🔥 tăng vùng attack
 
-            x_adv = torch.clamp(x_adv, 0, 255)
+            victim_batch = victim_emb.repeat(attacker_img.size(0), 1)
 
-            
-            # Identity loss
-            emb_adv = fr_model(x_adv)
-            loss_id = cosine_loss(emb_adv, victim_emb)
-
-            
-            # Perceptual loss (USE UTILS)
-            loss_perc = perceptual_loss(
-                vgg_model,
-                x_adv,
-                attacker_img
-            )
-
-            
-            # Smooth loss (USE UTILS)
-            loss_smooth = smooth_loss(x_adv)
-
-            
-            # Region loss
-            loss_reg = region_loss(
-                x_adv,
-                attacker_img,
-                mask
-            )
-
-            
-            # GAN loss
-            pred_fake = D(x_adv)
-            loss_gan_G = gan_loss(pred_fake, True)
-
-            # TOTAL LOSS (USE UTILS)
-            loss_G = total_loss(
-                loss_id,
-                loss_perc,
-                loss_reg,
-                loss_gan_G,
-                loss_style=0,
-                loss_edge=0,
-                loss_smooth=loss_smooth
-            )
-
-            opt_G.zero_grad()
-            loss_G.backward()
-            opt_G.step()
-
-            
-            # Train Discriminator
-            pred_real = D(attacker_img)
-            pred_fake = D(x_adv.detach())
-
-            loss_D = (
-                gan_loss(pred_real, True) +
-                gan_loss(pred_fake, False)
-            )
-
-            opt_D.zero_grad()
-            loss_D.backward()
-            opt_D.step()
-
-            
-            # metrics
-            cos_sim = F.cosine_similarity(
-                emb_adv,
-                victim_emb
-            ).mean().item()
-
-            epoch_cos += cos_sim
-            step_count += 1
-
-            pbar.set_postfix({
-                "G": f"{loss_G.item():.2f}",
-                "id": f"{loss_id.item():.2f}",
-                "cos": f"{cos_sim:.3f}"
-            })
-
-        epoch_cos /= step_count
-
-        print(f"\nEpoch {epoch} avg cosine: {epoch_cos:.4f}")
-
-        torch.save(
-            G.state_dict(),
-            os.path.join(SAVE_DIR, f"G_epoch_{epoch}.pth")
-        )
-
-        if epoch_cos > best_cos:
-            best_cos = epoch_cos
-            torch.save(G.state_dict(), BEST_MODEL_PATH)
-
-    torch.save(G.state_dict(), LAST_MODEL_PATH)
-
-    print("Training done")
-    print("Best cosine:", best_cos)
+            # =====================
+            # TRAIN D
+            # =====================
+            with torch.no_grad():
+                fake_img, _ = G(attacker_img, mask, victim_batch, makeup_img)
+                fake_img = fake_img.detach()  # 🔥 bắt buộc
 
 
+            with torch.autocast("cuda", enabled=False):
+                real_out = D(attacker_img)
+                fake_out = D(fake_img)
+                loss_D = gan_d_loss(real_out, fake_out)
 
-# MAIN
+            if not has_nan(loss_D):
+                opt_D.zero_grad(set_to_none=True)
+                scaler_D.scale(loss_D).backward()
+                scaler_D.step(opt_D)
+                scaler_D.update()
+
+            # =====================
+            # TRAIN G
+            # =====================
+            with torch.autocast("cuda", enabled=False):
+                adv_img, perturb = G(attacker_img, mask, victim_batch, makeup_img)
+                adv_img = torch.clamp(adv_img, 0, 1)
+            perturb = torch.clamp(perturb, -0.15, 0.15)
+            # 🔥 CHECK SỚM
+            if has_nan(adv_img):
+                print("🔥 NaN adv_img → skip")
+                continue
+
+
+            if has_nan(perturb):
+                print("🔥 NaN perturb → skip")
+                continue
+
+            # FaceNet FP32
+            with torch.amp.autocast("cuda", enabled=False):
+                emb_adv = fr(adv_img.float(), detach=False)
+                emb_adv = torch.clamp(emb_adv, -1, 1)
+            if has_nan(emb_adv):
+                print("🔥 NaN embedding → skip")
+                continue
+
+            emb_adv = torch.clamp(emb_adv, -1, 1)
+
+            # =====================
+            # LOSSES
+            # =====================
+            loss_id = identity_loss(emb_adv, victim_batch, attacker_emb)
+            loss_perc = perceptual_loss(vgg, adv_img, attacker_img)
+            loss_reg = region_loss(adv_img, attacker_img, mask)
+            loss_smooth = smooth_loss(perturb, mask)
+            loss_style = style_loss(vgg, adv_img, makeup_img)
+            loss_edge = edge_loss(lap, adv_img, makeup_img, mask)
+            loss_l2 = perturb.pow(2).mean()
+
+            with torch.autocast("cuda", enabled=False):
+                fake_out = D(adv_img)
+                loss_gan = gan_g_loss(fake_out)
+
+                loss_G = total_loss(
+                    loss_id, loss_perc, loss_reg,
+                    loss_gan, loss_style,
+                    loss_edge, loss_smooth, loss_l2
+                )
+
+            if has_nan(loss_G) or loss_G.abs() > 1e4:
+                print("🔥 Bad loss → skip")
+                continue
+
+            # =====================
+            # BACKWARD
+            # =====================
+            opt_G.zero_grad(set_to_none=True)
+
+            scaler_G.scale(loss_G).backward()
+
+            # check grad
+            grad_nan = False
+            for p in G.parameters():
+                if p.grad is not None:
+                    if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                        grad_nan = True
+                        break
+
+            if grad_nan:
+                print("🔥 NaN gradient → skip")
+                opt_G.zero_grad(set_to_none=True)
+                continue
+
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 0.2)
+            g_norm = grad_norm(G)
+
+            scaler_G.step(opt_G)
+            scaler_G.update()
+
+            # =====================
+            # LOG
+            # =====================
+            if step % 20 == 0:
+
+                with torch.no_grad():
+                    cos_v = F.cosine_similarity(emb_adv, victim_batch).mean().item()
+                    cos_a = F.cosine_similarity(emb_adv, attacker_emb).mean().item()
+                    perturb_mean = perturb.abs().mean().item()
+                    mask_mean = mask.mean().item()
+
+                pbar.set_postfix({
+                    "cos_v": f"{cos_v:.3f}",
+                    "cos_a": f"{cos_a:.3f}",
+                    "G": f"{loss_G.item():.2f}",
+                    "D": f"{loss_D.item():.2f}",
+                    "p": f"{perturb_mean:.4f}",
+                    "mask": f"{mask_mean:.3f}",
+                    "g": f"{g_norm:.2f}"
+                })
+
+        torch.save(G.state_dict(), os.path.join(SAVE_DIR, f"G_epoch_{epoch}.pth"))
+
+    print("✅ Training done")
+
+
 if __name__ == "__main__":
-
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-    dataset = AttackDataset(
-        os.path.join(BASE_DIR, "dataset"),
-        max_imgs_per_person=200
-    )
-
-    gan = GanNetwork(DEVICE)
-
-    fr_model = FaceNetWrapper(device=DEVICE).eval()
-    vgg_model = VGG16FeatureExtractor().to(DEVICE).eval()
-
-    train(
-        gan,
-        fr_model,
-        vgg_model,
-        dataset,
-        epochs=6,
-        batch_size=4,
-        num_workers=2
-    )
+    train()

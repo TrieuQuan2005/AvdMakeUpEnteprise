@@ -15,13 +15,16 @@ VggOutputs = namedtuple(
 
 class VGG16FeatureExtractor(nn.Module):
 
-    def __init__(self, pretrained=True, device=None):
+    def __init__(self, pretrained=True, device=None, debug=False):
         super().__init__()
 
+        self.debug = debug
         device = device or get_device()
 
         if pretrained:
-            vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features
+            vgg = models.vgg16(
+                weights=models.VGG16_Weights.IMAGENET1K_V1
+            ).features
         else:
             vgg = models.vgg16(weights=None).features
 
@@ -36,19 +39,34 @@ class VGG16FeatureExtractor(nn.Module):
         self.eval()
         self.to(device)
 
+    # =========================
+    # SAFE FORWARD
+    # =========================
     def forward(self, x):
 
+        def safe(name, t):
+            if self.debug:
+                if torch.isnan(t).any():
+                    print(f"🔥 NaN in {name}")
+                if torch.isinf(t).any():
+                    print(f"🔥 INF in {name}")
+                print(f"[{name}] min={t.min().item():.3f} max={t.max().item():.3f}")
+
+            return torch.nan_to_num(t, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        x = safe("input", x)
+
         h = self.slice1(x)
-        relu1_2 = h
+        relu1_2 = safe("relu1_2", h)
 
         h = self.slice2(h)
-        relu2_2 = h
+        relu2_2 = safe("relu2_2", h)
 
         h = self.slice3(h)
-        relu3_3 = h
+        relu3_3 = safe("relu3_3", h)
 
         h = self.slice4(h)
-        relu4_3 = h
+        relu4_3 = safe("relu4_3", h)
 
         return VggOutputs(
             relu1_2,
@@ -57,10 +75,32 @@ class VGG16FeatureExtractor(nn.Module):
             relu4_3
         )
 
-    # VGG preprocess
+    # =========================
+    # SAFE PREPROCESS (FIX NaN)
+    # =========================
     @staticmethod
     def preprocess_vgg(x):
-        x = x / 255.0
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
-        return (x - mean) / std
+
+        # detect range
+        if x.max() > 1.5:
+            x = x / 255.0
+
+        # 🔥 clamp cực quan trọng
+        x = torch.clamp(x, 0.0, 1.0)
+
+        mean = torch.tensor(
+            [0.485, 0.456, 0.406],
+            device=x.device
+        ).view(1, 3, 1, 1)
+
+        std = torch.tensor(
+            [0.229, 0.224, 0.225],
+            device=x.device
+        ).view(1, 3, 1, 1)
+
+        x = (x - mean) / std
+
+        # 🔥 chống NaN
+        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        return x

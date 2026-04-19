@@ -7,21 +7,26 @@ import os
 
 
 class FaceNetWrapper(nn.Module):
-    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, device=None, freeze=True):
         super().__init__()
 
-        self.device = device
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.model = InceptionResnetV1(
             pretrained='vggface2',
             classify=False
-        ).eval().to(device)
+        ).to(self.device).eval()
+
+        # 🔥 freeze để tránh update nhầm
+        if freeze:
+            for p in self.model.parameters():
+                p.requires_grad = False
 
         self.input_size = (160, 160)
 
     def preprocess(self, x):
-        # x: [B,3,H,W] range [0,255]
 
+        # resize chuẩn FaceNet
         x = F.interpolate(
             x,
             size=self.input_size,
@@ -29,22 +34,30 @@ class FaceNetWrapper(nn.Module):
             align_corners=False
         )
 
-        # normalize đúng FaceNet
-        x = x / 255.0
+        x = torch.clamp(x, 0, 1)
+
+        # normalize về [-1, 1]
         x = (x - 0.5) / 0.5
 
         return x
 
-    def forward(self, x):
+    def forward(self, x, detach=False):
         x = self.preprocess(x)
+
         emb = self.model(x)
-        emb = F.normalize(emb, dim=1)
+
+        # 🔥 normalize embedding (cực quan trọng cho cosine)
+        emb = F.normalize(emb, dim=1, eps=1e-8)
+
+        if detach:
+            emb = emb.detach()
+
         return emb
 
     @torch.no_grad()
     def get_embedding(self, x):
-        return self.forward(x)
-    
+        return self.forward(x, detach=True)
+
 
 class BasicConv2d(nn.Module):
 
